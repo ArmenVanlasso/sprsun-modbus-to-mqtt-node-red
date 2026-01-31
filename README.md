@@ -1,5 +1,5 @@
 # sprsun-modbus-to-mqtt-node-red
-Complete Node‑RED flow for integrating Sprsun CGK040‑V3L heat pump with Home Assistant via Modbus TCP and MQTT Discovery
+Complete Node‑RED flow for integrating Sprsun CGK030-V3L, CGK040‑V3L, CGK050-V3L and CGK060-V3L heat pump with Home Assistant via Modbus TCP and MQTT Discovery
 
 
 Production‑ready Node‑RED flow for Sprsun CGK040‑V3L: Modbus register mapping, data scaling, alarm handling, MQTT publishing and full Home Assistant MQTT Discovery.
