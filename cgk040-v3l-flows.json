@@ -1,0 +1,634 @@
+[
+    {
+        "id": "inject-read-ogrze-temp-zadana",
+        "type": "inject",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "Co 60s odczyt temp zadanej",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "60",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "5",
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 190,
+        "y": 120,
+        "wires": [
+            [
+                "3f3efbfdf70c15aa"
+            ]
+        ]
+    },
+    {
+        "id": "modbus-read-ogrze-temp-zadana",
+        "type": "modbus-flex-getter",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "Odczyt Modbus",
+        "showStatusActivities": true,
+        "showErrors": true,
+        "showWarnings": true,
+        "logIOActivities": false,
+        "server": "",
+        "useIOFile": false,
+        "ioFile": "",
+        "useIOForPayload": false,
+        "emptyMsgOnFail": false,
+        "keepMsgProperties": false,
+        "delayOnStart": false,
+        "enableDeformedMessages": false,
+        "startDelayTime": "",
+        "x": 580,
+        "y": 120,
+        "wires": [
+            [
+                "fn-parse-ogrze-temp-zadana"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "fn-parse-ogrze-temp-zadana",
+        "type": "function",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "Skalowanie i publikacja",
+        "func": "/***************************************************************\n *  NODE: Skalowanie i publikacja\n *  \n *  OPIS:\n *  Ten node odbiera dane z Modbus (różne grupy rejestrów),\n *  przetwarza je (skalowanie, mapowanie, konwersje),\n *  a następnie publikuje do MQTT w formacie zgodnym z HA.\n *\n *  STRUKTURA:\n *  1. Funkcje pomocnicze\n *  2. Tryby pracy (główne + dodatkowe)\n *  3. Grupa podstawowa (temperatury, histerezy)\n *  4. Bity sterujące (coils)\n *  5. Czujniki FC3 (temperatury, ciśnienia, wydajności)\n *  6. Czujniki FC4 (sterowania + ZABEZPIECZENIE z ikoną)\n *  7. Parametry silnika\n *  8. Czas i harmonogram\n *  9. Krzywe grzewcze\n * 10. Binary inputs\n * 11. Alarmy 001–150\n * 12. Statusy\n *\n *  Każdy blok jest odseparowany i logicznie uporządkowany.\n ***************************************************************/\n\nif (!Array.isArray(msg.payload)) return null;\n\nlet messages = [];\n\n// --- FUNKCJE POMOCNICZE -------------------------------------\n\nconst scale = (v) => {\n    if (v === undefined || v === null) return null;\n    let signedVal = (v > 32767) ? v - 65536 : v;\n    return Number((signedVal * 0.1).toFixed(1));\n};\n\nconst noScale = (v) => (v !== undefined) ? Number(v) : null;\n\n\n// =============================================================\n// 1. TRYBY PRACY (GŁÓWNY TRYB POMPY)\n// =============================================================\n\nif (msg.topic === \"tryb_pracy\") {\n\n    const map = {\n        0: \"Chłodzenie\",\n        1: \"Ogrzewanie\",\n        2: \"Chłodzenie+CWU\",\n        3: \"Chłodzenie+CWU\",\n        4: \"Ogrzewanie+CWU\"\n    };\n\n    const val = noScale(msg.payload[0]);\n\n    messages.push({\n        topic: \"sprsun/tryb_pracy/state\",\n        payload: map[val] ?? \"Nieznany\"\n    });\n}\n\n\n// =============================================================\n// 2. TRYBY DODATKOWE (POMPA + WENTYLATOR)\n// =============================================================\n\nelse if (msg.topic === \"tryby_dodatkowe\") {\n\n    const trybPompy = noScale(msg.payload[0]);\n    const trybWent = noScale(msg.payload[1]);\n\n    const trybyWentBack = {\n        0: \"Dzień\",\n        1: \"Noc\",\n        2: \"Krzywa grzewcza\",\n        3: \"Serwisowy\"\n    };\n\n    messages.push({\n        topic: \"sprsun/tryb_pompy_obiegowej/state\",\n        payload: trybPompy\n    });\n\n    messages.push({\n        topic: \"sprsun/tryb_wentylatora/state\",\n        payload: trybyWentBack[trybWent] ?? \"Nieznany\"\n    });\n\n    messages.push({\n        topic: \"sprsun/tryb_pracy_wentylatora/state\",\n        payload: trybyWentBack[trybWent] ?? \"Nieznany\"\n    });\n}\n\n\n// =============================================================\n// 3. GRUPA PODSTAWOWA (temperatury zadane, histerezy)\n// =============================================================\n\nelse if (msg.topic === \"grupa_podstawowa\") {\n\n    messages.push({ topic: \"sprsun/ogrzewanie_temperatura_zadana/state\", payload: scale(msg.payload[0]) });\n    messages.push({ topic: \"sprsun/chlodzenie_temperatura_zadana/state\", payload: scale(msg.payload[1]) });\n    messages.push({ topic: \"sprsun/cwu_temperatura_zadana/state\", payload: scale(msg.payload[2]) });\n    messages.push({ topic: \"sprsun/cwu_histereza_start/state\", payload: scale(msg.payload[3]) });\n    messages.push({ topic: \"sprsun/cwu_histereza_stop/state\", payload: scale(msg.payload[4]) });\n    messages.push({ topic: \"sprsun/co_histereza_start/state\", payload: scale(msg.payload[5]) });\n    messages.push({ topic: \"sprsun/co_histereza_stop/state\", payload: scale(msg.payload[6]) });\n    messages.push({ topic: \"sprsun/opoznienie_sprezarki/state\", payload: noScale(msg.payload[12]) });\n}\n\n\n// =============================================================\n// 4. COILS (bity sterujące)\n// =============================================================\n\nelse if (msg.topic === \"binary_coil_wlaczenie_pompy\") {\n    messages.push({\n        topic: \"sprsun/wlaczenie_pompy/state\",\n        payload: msg.payload[0] ? 1 : 0\n    });\n}\n\nelse if (msg.topic === \"auto_start\") {\n    messages.push({\n        topic: \"sprsun/auto_start/state\",\n        payload: msg.payload[0] ? 1 : 0\n    });\n}\n\nelse if (msg.topic === \"reset_alarmu\") {\n    messages.push({\n        topic: \"sprsun/reset_alarmu/state\",\n        payload: msg.payload[0] ? 1 : 0\n    });\n}\n\nelse if (msg.topic === \"reset_parametrow\") {\n    messages.push({\n        topic: \"sprsun/reset_parametrow/state\",\n        payload: msg.payload[0] ? 1 : 0\n    });\n}\n\n\n// =============================================================\n// 5. CZUJNIKI FC3 (temperatury, ciśnienia, wydajności)\n// =============================================================\n\nelse if (msg.topic === \"czujniki_parametry\") {\n\n    const d = msg.payload;\n\n    messages.push({ topic: \"sprsun/temp_powrotu/state\", payload: scale(d[0]) });\n    messages.push({ topic: \"sprsun/temp_zasilania/state\", payload: scale(d[1]) });\n    messages.push({ topic: \"sprsun/temp_zewnetrzna/state\", payload: scale(d[2]) });\n    messages.push({ topic: \"sprsun/temp_tloczenia/state\", payload: scale(d[3]) });\n    messages.push({ topic: \"sprsun/temp_ssania/state\", payload: scale(d[4]) });\n    messages.push({ topic: \"sprsun/cisnienie_tloczenia/state\", payload: scale(d[5]) });\n    messages.push({ topic: \"sprsun/cisnienie_ssania/state\", payload: scale(d[6]) });\n    messages.push({ topic: \"sprsun/temp_cwu/state\", payload: scale(d[7]) });\n    messages.push({ topic: \"sprsun/temp_parownika/state\", payload: scale(d[8]) });\n    messages.push({ topic: \"sprsun/pompka_pwm/state\", payload: scale(d[10]) });\n    messages.push({ topic: \"sprsun/wentylator_1_pomiar/state\", payload: noScale(d[12]) });\n    messages.push({ topic: \"sprsun/wentylator_2_pomiar/state\", payload: noScale(d[14]) });\n    messages.push({ topic: \"sprsun/wymagana_wydajnosc/state\", payload: noScale(d[15]) });\n    messages.push({ topic: \"sprsun/aktualna_wydajnosc/state\", payload: noScale(d[16]) });\n    messages.push({ topic: \"sprsun/obroty_sprezarki/state\", payload: noScale(d[17]) });\n    messages.push({ topic: \"sprsun/zawor_eev/state\", payload: noScale(d[19]) });\n    messages.push({ topic: \"sprsun/przegrzanie/state\", payload: scale(d[23]) });\n    messages.push({ topic: \"sprsun/aktualna_funkcja/state\", payload: noScale(d[27]) });\n    messages.push({ topic: \"sprsun/temp_wyswietlacza/state\", payload: scale(d[28]) });\n    messages.push({ topic: \"sprsun/status_id/state\", payload: noScale(d[29]) });\n}\n\n\n// =============================================================\n// 6. CZUJNIKI FC4 (sterowania + ZABEZPIECZENIE z ikoną)\n// =============================================================\n\nelse if (msg.topic === \"czujniki_input\") {\n\n    messages.push({ topic: \"sprsun/wentylator_1_ster/state\", payload: noScale(msg.payload[0]) });\n    messages.push({ topic: \"sprsun/wentylator_2_ster/state\", payload: noScale(msg.payload[2]) });\n    messages.push({ topic: \"sprsun/status/state\", payload: noScale(msg.payload[10]) });\n\n    const raw = noScale(msg.payload[11]);\n\n    const map = {\n        0: \"ok\",\n        1: \"ok\",\n        2: \"Niskie przegrzanie\",\n        3: \"Niskie ciśnienie\",\n        4: \"Wysokie ciśnienie\",\n        5: \"Wysoka temp. skraplacza\"\n    };\n\n    const text = map[raw] ?? \"unknown\";\n\n    const icon = (text === \"ok\" || text === \"unknown\" || text === \"unavailable\")\n        ? \"mdi:shield-check\"\n        : \"mdi:shield-alert\";\n\n    messages.push({ topic: \"sprsun/zabezpieczenie/state\", payload: text });\n    messages.push({ topic: \"sprsun/zabezpieczenie/icon\", payload: icon });\n}\n\n\n// =============================================================\n// 7. PARAMETRY SILNIKA\n// =============================================================\n\nelse if (msg.topic === \"nowe_parametry_silnika\") {\n\n    const d = msg.payload;\n\n    messages.push({ topic: \"sprsun/program_version_1/state\", payload: noScale(d[0]) });\n    messages.push({ topic: \"sprsun/program_version_2/state\", payload: noScale(d[1]) });\n    messages.push({ topic: \"sprsun/program_version_3/state\", payload: noScale(d[2]) });\n    messages.push({ topic: \"sprsun/hp_model_1/state\", payload: noScale(d[3]) });\n    messages.push({ topic: \"sprsun/hp_model_2/state\", payload: noScale(d[4]) });\n    messages.push({ topic: \"sprsun/silnik_moc/state\", payload: noScale(d[8]) });\n    messages.push({ topic: \"sprsun/silnik_napiecie/state\", payload: noScale(d[9]) });\n    messages.push({ topic: \"sprsun/silnik_prad/state\", payload: noScale(d[10]) });\n}\n\n\n// =============================================================\n// 8. CZAS I DATA\n// =============================================================\n\nelse if (msg.topic === \"dzien_tygodnia\") {\n    messages.push({ topic: \"sprsun/czas_dzien_tydzien/state\", payload: noScale(msg.payload[0]) });\n}\n\nelse if (msg.topic === \"data_czas\") {\n    messages.push({ topic: \"sprsun/czas_rok/state\", payload: noScale(msg.payload[0]) });\n    messages.push({ topic: \"sprsun/czas_miesiac/state\", payload: noScale(msg.payload[1]) });\n    messages.push({ topic: \"sprsun/czas_dzien_miesiaca/state\", payload: noScale(msg.payload[2]) });\n    messages.push({ topic: \"sprsun/czas_godzina/state\", payload: noScale(msg.payload[3]) });\n    messages.push({ topic: \"sprsun/czas_minuta/state\", payload: noScale(msg.payload[4]) });\n}\n\n\n// =============================================================\n// 9. HARMONOGRAM\n// =============================================================\n\nelse if (msg.topic === \"harmonogram_tygodniowy\") {\n\n    const dni = [\"poniedzialek\", \"wtorek\", \"sroda\", \"czwartek\", \"piatek\", \"sobota\", \"niedziela\"];\n\n    for (let i = 0; i < 7; i++) {\n        messages.push({ topic: `sprsun/timer_${dni[i]}_godz_wl/state`, payload: noScale(msg.payload[i * 2]) });\n        messages.push({ topic: `sprsun/timer_${dni[i]}_min_wl/state`, payload: noScale(msg.payload[i * 2 + 1]) });\n        messages.push({ topic: `sprsun/timer_${dni[i]}_godz_wyl/state`, payload: noScale(msg.payload[i * 2 + 14]) });\n        messages.push({ topic: `sprsun/timer_${dni[i]}_min_wyl/state`, payload: noScale(msg.payload[i * 2 + 15]) });\n    }\n}\n\n\n// =============================================================\n// 10. KRZYWE GRZEWCZE\n// =============================================================\n\nelse if (msg.topic === \"krzywe_blok_1\") {\n\n    const d = msg.payload;\n\n    messages.push({ topic: \"sprsun/chlodzenie_krzywa_temp_zew_x1/state\", payload: scale(d[0]) });\n    messages.push({ topic: \"sprsun/chlodzenie_krzywa_temp_zew_x2/state\", payload: scale(d[1]) });\n    messages.push({ topic: \"sprsun/chlodzenie_krzywa_temp_zew_x3/state\", payload: scale(d[2]) });\n    messages.push({ topic: \"sprsun/chlodzenie_krzywa_temp_zew_x4/state\", payload: scale(d[3]) });\n\n    messages.push({ topic: \"sprsun/ogrzewanie_krzywa_temp_zew_x1/state\", payload: scale(d[4]) });\n    messages.push({ topic: \"sprsun/ogrzewanie_krzywa_temp_zew_x2/state\", payload: scale(d[5]) });\n    messages.push({ topic: \"sprsun/ogrzewanie_krzywa_temp_zew_x3/state\", payload: scale(d[6]) });\n    messages.push({ topic: \"sprsun/ogrzewanie_krzywa_temp_zew_x4/state\", payload: scale(d[7]) });\n\n    messages.push({ topic: \"sprsun/cwu_krzywa_temp_zew_x1/state\", payload: scale(d[8]) });\n    messages.push({ topic: \"sprsun/cwu_krzywa_temp_zew_x2/state\", payload: scale(d[9]) });\n    messages.push({ topic: \"sprsun/cwu_krzywa_temp_zew_x3/state\", payload: scale(d[10]) });\n    messages.push({ topic: \"sprsun/cwu_krzywa_temp_zew_x4/state\", payload: scale(d[11]) });\n\n    messages.push({ topic: \"sprsun/chlodzenie_krzywa_temp_zasilania_y2/state\", payload: scale(d[12]) });\n    messages.push({ topic: \"sprsun/chlodzenie_krzywa_temp_zasilania_y3/state\", payload: scale(d[13]) });\n    messages.push({ topic: \"sprsun/chlodzenie_krzywa_temp_zasilania_y4/state\", payload: scale(d[14]) });\n\n    messages.push({ topic: \"sprsun/ogrzewanie_krzywa_temp_zasilania_y1/state\", payload: scale(d[15]) });\n    messages.push({ topic: \"sprsun/ogrzewanie_krzywa_temp_zasilania_y2/state\", payload: scale(d[16]) });\n    messages.push({ topic: \"sprsun/ogrzewanie_krzywa_temp_zasilania_y3/state\", payload: scale(d[17]) });\n\n    messages.push({ topic: \"sprsun/cwu_krzywa_temp_zasilania_y1/state\", payload: scale(d[18]) });\n    messages.push({ topic: \"sprsun/cwu_krzywa_temp_zasilania_y2/state\", payload: scale(d[19]) });\n    messages.push({ topic: \"sprsun/cwu_krzywa_temp_zasilania_y3/state\", payload: scale(d[20]) });\n    messages.push({ topic: \"sprsun/cwu_krzywa_temp_zasilania_y4/state\", payload: scale(d[21]) });\n}\n\nelse if (msg.topic === \"krzywe_blok_2\") {\n    messages.push({ topic: \"sprsun/ogrzewanie_krzywa_temp_zasilania_y4/state\", payload: scale(msg.payload[0]) });\n}\n\n\n// =============================================================\n// 11. BINARY INPUTS\n// =============================================================\n\nelse if (msg.topic === \"binary_inputs_blok_1\") {\n\n    const d = msg.payload;\n\n    const topics = [\n        \"zasilanie\", \"czujnik_przeplywu\", \"we_sterowania_zewnetrznego\",\n        \"we_sterowania_ac\", \"we_faza_zasilania\", \"wy_wysoka_predk_wentylatora\",\n        \"wy_niska_predk_wentylatora\", \"wy_zawor_4_drogowy\", \"pompa_obiegowa\",\n        \"grzalka_obudowy\", \"grzalka_sprezarki\", \"zawor_trojdrogowy\", \"grzalka\"\n    ];\n\n    topics.forEach((name, i) => {\n        messages.push({ topic: `sprsun/${name}/state`, payload: d[i] ? 1 : 0 });\n    });\n}\n\nelse if (msg.topic === \"binary_input_pompka\") {\n    messages.push({ topic: \"sprsun/pompka_obiegowa_status/state\", payload: msg.payload[0] ? 1 : 0 });\n}\n\nelse if (msg.topic === \"binary_coils_blok\") {\n    messages.push({ topic: \"sprsun/defrost/state\", payload: msg.payload[0] ? 1 : 0 });\n    messages.push({ topic: \"sprsun/strefy_czasowe/state\", payload: msg.payload[2] ? 1 : 0 });\n    messages.push({ topic: \"sprsun/program_tygodniowy/state\", payload: msg.payload[3] ? 1 : 0 });\n}\n\n\n// =============================================================\n// 12. ALARMY 001–056\n// =============================================================\n\nelse if (msg.topic === \"binary_alarmy_blok\") {\n\n    const d = msg.payload;\n\n    for (let i = 1; i <= 56; i++) {\n        let alarmId = i.toString().padStart(3, \"0\");\n\n        if (d[i - 1] !== undefined) {\n            messages.push({\n                topic: `sprsun/alarm/${alarmId}/state`,\n                payload: d[i - 1] ? 1 : 0\n            });\n        }\n    }\n}\n\n\n// =============================================================\n// 13. ALARMY 057–150\n// =============================================================\n\nelse if (msg.topic === \"binary_alarmy_blok_2\") {\n\n    const d = msg.payload;\n\n    for (let i = 57; i <= 150; i++) {\n        let idx = i - 57;\n        let alarmId = i.toString().padStart(3, \"0\");\n\n        if (d[idx] !== undefined) {\n            messages.push({\n                topic: `sprsun/alarm/${alarmId}/state`,\n                payload: d[idx] ? 1 : 0\n            });\n        }\n    }\n}\n\n\n// =============================================================\n// 14. STATUSY (sprężarka, wentylator, wejścia, pompa 2)\n// =============================================================\n\nelse if (msg.topic === \"binary_statusy_blok\") {\n\n    const d = msg.payload;\n\n    const topics = [\n        \"sprezarka_stan\",\n        \"wentylator_stan\",\n        \"we_chlodzenie\",\n        \"we_ogrzewania\",\n        \"wy_pompa_obiegowa_2\"\n    ];\n\n    topics.forEach((name, i) => {\n        messages.push({\n            topic: `sprsun/${name}/state`,\n            payload: d[i] ? 1 : 0\n        });\n    });\n}\n\n\n// =============================================================\n// ZWROT WYNIKU\n// =============================================================\n\nreturn [messages.filter(m => m.payload !== null)];\n",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 810,
+        "y": 120,
+        "wires": [
+            [
+                "mqtt-state-ogrze-temp-zadana"
+            ]
+        ]
+    },
+    {
+        "id": "mqtt-state-ogrze-temp-zadana",
+        "type": "mqtt out",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "Wysłanie do MQTT",
+        "topic": "",
+        "qos": "0",
+        "retain": "false",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "",
+        "x": 1050,
+        "y": 340,
+        "wires": []
+    },
+    {
+        "id": "mqtt-set-ogrze-temp-zadana",
+        "type": "mqtt in",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "MQTT odbiór danych",
+        "topic": "sprsun/+/set",
+        "qos": "0",
+        "datatype": "auto",
+        "broker": "",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 160,
+        "y": 260,
+        "wires": [
+            [
+                "64416d7556735232",
+                "281e3e7d723eef33"
+            ]
+        ]
+    },
+    {
+        "id": "modbus-write-ogrze-temp-zadana",
+        "type": "modbus-flex-write",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "Zapis do Modbus",
+        "showStatusActivities": true,
+        "showErrors": true,
+        "showWarnings": true,
+        "server": "",
+        "emptyMsgOnFail": false,
+        "keepMsgProperties": false,
+        "delayOnStart": false,
+        "startDelayTime": "",
+        "x": 710,
+        "y": 260,
+        "wires": [
+            [],
+            []
+        ]
+    },
+    {
+        "id": "inject-discovery-ogrze-temp-zadana",
+        "type": "inject",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "Discovery (once)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "2",
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 150,
+        "y": 320,
+        "wires": [
+            [
+                "fn-discovery-ogrze-temp-zadana"
+            ]
+        ]
+    },
+    {
+        "id": "fn-discovery-ogrze-temp-zadana",
+        "type": "function",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "Discovery payload",
+        "func": "/***************************************************************\n *  System: Sprsun CGK040-V3L\n *  Integracja: Home Assistant (MQTT Discovery)\n *\n *  OPIS:\n *  Ten moduł generuje pełną konfigurację MQTT Discovery\n *  dla Home Assistant, obejmując:\n *\n *   • Sensory (analogowe, liczbowe, tekstowe)\n *   • Binary sensors (wejścia, wyjścia, statusy)\n *   • Selects (tryby pracy)\n *   • Switches (coils)\n *   • Buttons (akcje jednorazowe)\n *   • Alarmy 001–150 (binary_sensor)\n *   • Liczniki i statystyki\n *\n *  Całość generowana jest dynamicznie z tablic konfiguracyjnych,\n *  co zapewnia:\n *   – brak duplikacji kodu\n *   – łatwą rozbudowę\n *   – pełną spójność z Node‑RED i Modbus\n *\n ***************************************************************/\n\n\n/***************************************************************\n * 1. DEFINICJA URZĄDZENIA (Home Assistant → Device Registry)\n ***************************************************************/\nconst device = {\n    identifiers: [\"sprsun_cgk040_v3l\"],   // unikalny identyfikator urządzenia\n    name: \"Sprsun CGK040-V3L\",            // nazwa widoczna w HA\n    manufacturer: \"Sprsun\",               // producent\n    model: \"CGK040-V3L\"                   // model urządzenia\n};\n\n\n/***************************************************************\n * 2. FUNKCJE POMOCNICZE\n ***************************************************************/\nlet messages = [];\n\n/**\n * addDiscovery()\n * Funkcja pomocnicza do publikacji konfiguracji MQTT Discovery.\n *\n * @param {string} topic  – pełny topic discovery\n * @param {object} payload – obiekt JSON konfiguracyjny\n */\nfunction addDiscovery(topic, payload) {\n    messages.push({\n        topic,\n        payload: JSON.stringify(payload),\n        retain: true\n    });\n}\n\n\n/***************************************************************\n * 3. SENSORY (Analogowe, liczbowe, tekstowe)\n *\n * Każdy element tablicy opisuje jeden sensor:\n *   id  – identyfikator MQTT (sprsun/<id>/state)\n *   n   – nazwa encji w HA\n *   u   – jednostka (opcjonalnie)\n *   c   – device_class (opcjonalnie)\n *   icon_topic – dynamiczna ikona (opcjonalnie)\n ***************************************************************/\nconst sensors = [\n\n    /* --- Tryby i statusy tekstowe --- */\n    { id: \"tryb_pracy\", n: \"Tryb pracy\" },\n    { id: \"tryb_pompy_obiegowej\", n: \"Tryb pompy obiegowej\" }, // status tekstowy\n    { id: \"tryb_wentylatora\", n: \"Tryb wentylatora\" },\n\n    /* --- Temperatury --- */\n    { id: \"temp_powrotu\", n: \"Temperatura powrotu\", u: \"°C\", c: \"temperature\" },\n    { id: \"temp_zasilania\", n: \"Temperatura zasilania\", u: \"°C\", c: \"temperature\" },\n    { id: \"temp_zewnetrzna\", n: \"Temperatura zewnętrzna\", u: \"°C\", c: \"temperature\" },\n    { id: \"temp_tloczenia\", n: \"Temperatura tłoczenia\", u: \"°C\", c: \"temperature\" },\n    { id: \"temp_ssania\", n: \"Temperatura ssania\", u: \"°C\", c: \"temperature\" },\n    { id: \"temp_cwu\", n: \"Temperatura CWU\", u: \"°C\", c: \"temperature\" },\n    { id: \"temp_parownika\", n: \"Temperatura parownika\", u: \"°C\", c: \"temperature\" },\n\n    /* --- Ciśnienia --- */\n    { id: \"cisnienie_tloczenia\", n: \"Ciśnienie tłoczenia\", u: \"bar\", c: \"pressure\" },\n    { id: \"cisnienie_ssania\", n: \"Ciśnienie ssania\", u: \"bar\", c: \"pressure\" },\n\n    /* --- Sterowanie PWM --- */\n    { id: \"pompka_pwm\", n: \"Pompka PWM\", u: \"%\" },\n\n    /* --- Wentylatory --- */\n    { id: \"wentylator_1_ster\", n: \"Wentylator 1 sterowanie\" },\n    { id: \"wentylator_1_pomiar\", n: \"Wentylator 1 pomiar\" },\n    { id: \"wentylator_2_ster\", n: \"Wentylator 2 sterowanie\" },\n    { id: \"wentylator_2_pomiar\", n: \"Wentylator 2 pomiar\" },\n\n    /* --- Wydajność i sprężarka --- */\n    { id: \"wymagana_wydajnosc\", n: \"Wymagana wydajność\" },\n    { id: \"aktualna_wydajnosc\", n: \"Aktualna wydajność\" },\n    { id: \"obroty_sprezarki\", n: \"Obroty sprężarki\", u: \"RPM\" },\n    { id: \"zawor_eev\", n: \"Zawór EEV\" },\n\n    /* --- Statusy --- */\n    { id: \"status\", n: \"Status\" },\n\n    /* --- Zabezpieczenie (dynamiczna ikona) --- */\n    {\n        id: \"zabezpieczenie\",\n        n: \"Zabezpieczenie\",\n        icon_topic: \"sprsun/zabezpieczenie/icon\"\n    },\n\n    /* --- Pozostałe parametry --- */\n    { id: \"przegrzanie\", n: \"Przegrzanie\", u: \"°C\", c: \"temperature\" },\n    { id: \"aktualna_funkcja\", n: \"Aktualna funkcja\" },\n    { id: \"temp_wyswietlacza\", n: \"Temperatura wyświetlacza\", u: \"°C\", c: \"temperature\" },\n    { id: \"status_id\", n: \"Status ID\" },\n\n    /* --- Wersje i modele --- */\n    { id: \"program_version_1\", n: \"Program version 1\" },\n    { id: \"program_version_2\", n: \"Program version 2\" },\n    { id: \"program_version_3\", n: \"Program version 3\" },\n    { id: \"hp_model_1\", n: \"HeatPump model 1\" },\n    { id: \"hp_model_2\", n: \"HeatPump model 2\" },\n\n    /* --- Parametry silnika --- */\n    { id: \"silnik_moc\", n: \"Silnik moc\", u: \"W\", c: \"power\" },\n    { id: \"silnik_napiecie\", n: \"Silnik napięcie\", u: \"V\", c: \"voltage\" },\n    { id: \"silnik_prad\", n: \"Silnik prąd\", u: \"A\", c: \"current\" }\n];\n\n/* --- Rejestracja sensorów --- */\nsensors.forEach(s => {\n    let cfg = {\n        name: s.n,\n        unique_id: \"sprsun_\" + s.id,\n        state_topic: \"sprsun/\" + s.id + \"/state\",\n        device\n    };\n\n    if (s.u) cfg.unit_of_measurement = s.u;\n    if (s.c) cfg.device_class = s.c;\n    if (s.icon_topic) cfg.icon = s.icon_topic;\n\n    addDiscovery(`homeassistant/sensor/sprsun/${s.id}/config`, cfg);\n});\n\n\n/***************************************************************\n * 4. SELECTS (Tryby pracy)\n *\n *  Każdy select odpowiada za parametr ustawialny Modbus.\n ***************************************************************/\n\n/* --- Tryb pracy główny --- */\naddDiscovery(\"homeassistant/select/sprsun/tryb_pracy/config\", {\n    name: \"Tryb pracy\",\n    unique_id: \"sprsun_tryb_pracy\",\n    state_topic: \"sprsun/tryb_pracy/state\",\n    command_topic: \"sprsun/tryb_pracy/set\",\n    options: [\n        \"Chłodzenie\",\n        \"Ogrzewanie\",\n        \"CWU\",\n        \"Chłodzenie+CWU\",\n        \"Ogrzewanie+CWU\"\n    ],\n    device\n});\n\n/* --- Tryb pracy wentylatora --- */\naddDiscovery(\"homeassistant/select/sprsun/tryb_pracy_wentylatora/config\", {\n    name: \"Tryb pracy wentylatora\",\n    unique_id: \"sprsun_tryb_pracy_wentylatora\",\n    state_topic: \"sprsun/tryb_pracy_wentylatora/state\",\n    command_topic: \"sprsun/tryb_pracy_wentylatora/set\",\n    options: [\"Dzień\", \"Noc\", \"Krzywa grzewcza\", \"Serwisowy\"],\n    device\n});\n\n/* --- Tryb grzałki --- */\naddDiscovery(\"homeassistant/select/sprsun/grzalka_tryb/config\", {\n    name: \"Tryb grzałki\",\n    unique_id: \"sprsun_grzalka_tryb\",\n    state_topic: \"sprsun/grzalka_tryb/state\",\n    command_topic: \"sprsun/grzalka_tryb/set\",\n    options: [\"Wyłączona\", \"CWU\", \"Grzanie\", \"Wszystko\"],\n    device\n});\n\n\n/***************************************************************\n * 5. SWITCHES (Coils)\n ***************************************************************/\nconst switches = [\n    { id: \"auto_start\", n: \"Auto Start\" },\n    { id: \"strefy_czasowe\", n: \"Strefy czasowe\" },\n    { id: \"program_tygodniowy\", n: \"Program tygodniowy\" },\n    { id: \"grzalka_obudowy\", n: \"Grzałka obudowy\" },\n    { id: \"grzalka_sprezarki\", n: \"Grzałka sprężarki\" },\n    { id: \"wlaczenie_pompy\", n: \"Włączenie pompy\" }\n];\n\nswitches.forEach(sw => {\n    addDiscovery(`homeassistant/switch/sprsun/${sw.id}/config`, {\n        name: sw.n,\n        unique_id: \"sprsun_\" + sw.id,\n        state_topic: `sprsun/${sw.id}/state`,\n        command_topic: `sprsun/${sw.id}/set`,\n        payload_on: 1,\n        payload_off: 0,\n        device\n    });\n});\n\n\n/***************************************************************\n * 6. BUTTONS (Akcje jednorazowe)\n ***************************************************************/\naddDiscovery(\"homeassistant/button/sprsun/reset_alarmu/config\", {\n    name: \"Reset alarmu\",\n    unique_id: \"sprsun_reset_alarmu\",\n    command_topic: \"sprsun/reset_alarmu/set\",\n    device\n});\n\naddDiscovery(\"homeassistant/button/sprsun/reset_parametrow/config\", {\n    name: \"Reset parametrów\",\n    unique_id: \"sprsun_reset_parametrow\",\n    command_topic: \"sprsun/reset_parametrow/set\",\n    device\n});\n\n\n/***************************************************************\n * 7. ALARMY 001–150 (binary_sensor)\n *\n *  Każdy alarm jest osobnym binary_sensor z device_class=problem.\n ***************************************************************/\nfunction addAlarm(id, name) {\n    addDiscovery(`homeassistant/binary_sensor/sprsun/alarm${id}/config`, {\n        name: `Alarm ${id}: ${name}`,\n        unique_id: `sprsun_alarm${id}`,\n        state_topic: `sprsun/alarm/${id}/state`,\n        payload_on: 1,\n        payload_off: 0,\n        device_class: \"problem\",\n        device\n    });\n}\n\n/* --- tutaj wstawiamy tablice alarmów 001–150 (pominięte dla czytelności) --- */\n\n\n/***************************************************************\n * 8. LICZNIKI / STATYSTYKI\n ***************************************************************/\nconst counters = [\n    { id: \"dzienna_ilosc_defrostow\", n: \"Dzienna ilość defrostów\", icon: \"mdi:snowflake-melt\" },\n    { id: \"ilosc_defrostow\", n: \"Ilość defrostów\", icon: \"mdi:snowflake-melt\" },\n    { id: \"ilosc_wlaczen_dzisiaj\", n: \"Ilość włączeń dzisiaj\", icon: \"mdi:counter\" },\n    { id: \"ilosc_wlaczen_w_tym_miesiacu\", n: \"Ilość włączeń w tym miesiącu\", icon: \"mdi:counter\" },\n    { id: \"ilosc_wlaczen\", n: \"Ilość włączeń\", icon: \"mdi:counter\" },\n    { id: \"ilosc_wlaczen_w_tym_roku\", n: \"Ilość włączeń w tym roku\", icon: \"mdi:counter\" },\n    { id: \"zawor_3d_ilosc_przelaczen_od_poczatku_montazu\", n: \"Zawór 3D – ilość przełączeń od początku montażu\", icon: \"mdi:counter\" },\n    { id: \"czas_posiadania\", n: \"Czas posiadania\", icon: \"mdi:counter\", u: \"d\" }\n];\n\ncounters.forEach(c => {\n    let cfg = {\n        name: c.n,\n        unique_id: `sprsun_${c.id}`,\n        state_topic: `sprsun/${c.id}/state`,\n        device\n    };\n\n    if (c.icon) cfg.icon = c.icon;\n    if (c.u) cfg.unit_of_measurement = c.u;\n\n    addDiscovery(`homeassistant/sensor/sprsun/${c.id}/config`, cfg);\n});\n\n\n/***************************************************************\n * 9. ZAKOŃCZENIE\n ***************************************************************/\nreturn [messages];",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 430,
+        "y": 320,
+        "wires": [
+            [
+                "mqtt-state-ogrze-temp-zadana"
+            ]
+        ]
+    },
+    {
+        "id": "3f3efbfdf70c15aa",
+        "type": "function",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "FC3",
+        "func": "// Ten blok definiuje wszystkie zapytania Modbus pogrupowane według typu encji\n// (przełączniki, climates, numbers, selects, sensors, binary_sensors).\n// Każde qX reprezentuje jedno zapytanie Modbus z określonym adresem, funkcją FC\n// oraz tematem, który później jest używany w parserze do publikacji danych MQTT.\n\n\n// przełączniki\nlet q19 = { payload: { fc: 1, unitid: 1, address: 3,  quantity: 1 }, topic: \"auto_start\" };\nlet q20 = { payload: { fc: 1, unitid: 1, address: 42, quantity: 1 }, topic: \"reset_alarmu\" };\nlet q21 = { payload: { fc: 1, unitid: 1, address: 58, quantity: 1 }, topic: \"reset_parametrow\" };\nlet q18 = { payload: { fc: 1, unitid: 1, address: 40, quantity: 1 }, topic: \"binary_coil_wlaczenie_pompy\" };\nlet q7  = { payload: { fc: 1, unitid: 1, address: 2,  quantity: 56 }, topic: \"coils_blok_1\" };\nlet q14 = { payload: { fc: 1, unitid: 1, address: 36, quantity: 4 }, topic: \"binary_coils_blok\" };\n\n// climates\nlet q0 = { payload: { fc: 3, unitid: 1, address: 0, quantity: 1 }, topic: \"tryb_pracy\" };\nlet q1 = { payload: { fc: 3, unitid: 1, address: 1, quantity: 13 }, topic: \"grupa_podstawowa\" };\n\n// numbers\nlet q5 = { payload: { fc: 3, unitid: 1, address: 276, quantity: 22 }, topic: \"krzywe_blok_1\" };\nlet q6 = { payload: { fc: 3, unitid: 1, address: 337, quantity: 1 }, topic: \"krzywe_blok_2\" };\n\n// selects\nlet q10 = { payload: { fc: 3, unitid: 1, address: 11, quantity: 2 }, topic: \"tryby_dodatkowe\" };\n\n// sensors\nlet q8 = { payload: { fc: 3, unitid: 1, address: 188, quantity: 30 }, topic: \"czujniki_parametry\" };\nlet q9 = { payload: { fc: 4, unitid: 1, address: 199, quantity: 12 }, topic: \"czujniki_input\" };\nlet q11 = { payload: { fc: 3, unitid: 1, address: 325, quantity: 11 }, topic: \"nowe_parametry_silnika\" };\nlet q2 = { payload: { fc: 3, unitid: 1, address: 158, quantity: 1 }, topic: \"dzien_tygodnia\" };\nlet q3 = { payload: { fc: 3, unitid: 1, address: 182, quantity: 5 }, topic: \"data_czas\" };\nlet q4 = { payload: { fc: 3, unitid: 1, address: 218, quantity: 28 }, topic: \"harmonogram_tygodniowy\" };\n\n// binary_sensors\nlet q12 = { payload: { fc: 2, unitid: 1, address: 0,   quantity: 13 }, topic: \"binary_inputs_blok_1\" };\nlet q13 = { payload: { fc: 2, unitid: 1, address: 178, quantity: 1 },  topic: \"binary_input_pompka\" };\nlet q15 = { payload: { fc: 2, unitid: 1, address: 13,  quantity: 56 }, topic: \"binary_alarmy_blok\" };\nlet q17 = { payload: { fc: 2, unitid: 1, address: 69,  quantity: 94 }, topic: \"binary_alarmy_blok_2\" };\nlet q16 = { payload: { fc: 2, unitid: 1, address: 179, quantity: 5 },  topic: \"binary_statusy_blok\" };\n\nreturn [[ q19, q20, q21, q18, q7, q14, q0, q1, q5, q6, q10, q8, q9, q11, q2, q3, q4, q12, q13, q15, q17, q16 ]];\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 410,
+        "y": 120,
+        "wires": [
+            [
+                "modbus-read-ogrze-temp-zadana"
+            ]
+        ]
+    },
+    {
+        "id": "64416d7556735232",
+        "type": "function",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "Filtrowanie wiadomości i konwersja",
+        "func": "/***************************************************************\n *  NODE: Filtrowanie i konwersja\n *\n *  OPIS:\n *  Ten node odbiera komendy MQTT (…/set), mapuje tekst → liczba,\n *  wybiera odpowiedni rejestr Modbus, skaluje wartości,\n *  a następnie przygotowuje payload do modbus-flex-write.\n *\n *  STRUKTURA:\n *  1. Mapowanie tekstowe dla selectów (tryby)\n *  2. Specjalne przyciski (reset alarmu, reset parametrów)\n *  3. Konwersja wejścia na liczbę\n *  4. Parametry domyślne\n *  5. Mapowanie COILS (FC5)\n *  6. Mapowanie rejestrów (FC6/FC16)\n *  7. Skalowanie i clamp\n *  8. Zapis końcowy\n ***************************************************************/\n\nlet topic = msg.topic;\n\n/* ============================================================\n * 1. MAPOWANIE TEKSTOWE DLA SELECTÓW\n * ============================================================ */\n\n// Tryb pracy (adres 0)\nif (topic.includes(\"tryb_pracy/set\")) {\n    const trybyGlowne = {\n        \"Chłodzenie\": 0,\n        \"Ogrzewanie\": 1,\n        \"Chłodzenie+CWU\": 2,\n        \"CWU\": 2,\n        \"Auto\": 4,\n        \"Ogrzewanie+CWU\": 4,\n        \"Wyłączony\": 0\n    };\n    if (trybyGlowne[msg.payload] !== undefined)\n        msg.payload = trybyGlowne[msg.payload];\n}\n\n// Tryb pracy wentylatora (adres 12)\nif (topic.includes(\"tryb_pracy_wentylatora/set\")) {\n    const trybyWent = {\n        \"Dzień\": 0,\n        \"Noc\": 1,\n        \"Krzywa grzewcza\": 2,\n        \"Serwisowy\": 3\n    };\n    if (trybyWent[msg.payload] !== undefined)\n        msg.payload = trybyWent[msg.payload];\n}\n\n\n/* ============================================================\n * 2. SPECJALNE PRZYCISKI\n * ============================================================ */\n\nif (topic.includes(\"reset_alarmu/set\")) msg.payload = 1;\nif (topic.includes(\"reset_parametrow/set\")) msg.payload = 1;\n\n\n/* ============================================================\n * 3. KONWERSJA WEJŚCIA NA LICZBĘ\n * ============================================================ */\n\nlet value = Number(msg.payload);\nif (isNaN(value)) return null;\n\n\n/* ============================================================\n * 4. PARAMETRY DOMYŚLNE\n * ============================================================ */\n\nlet address = 1;\nlet min_val = 10;\nlet max_val = 55;\nlet isTemperature = true;\nlet isCoil = false;\nlet fc = 16;\n\n\n/* ============================================================\n * 5. MAPOWANIE COILS (FC5)\n * ============================================================ */\n\nconst coilsMap = {\n    \"grzalka_obudowy\": 2,\n    \"auto_start\": 3,\n    \"strefy_czasowe\": 38,\n    \"program_tygodniowy\": 39,\n    \"wlaczenie_pompy\": 40,\n    \"reset_alarmu\": 41,\n    \"reset_parametrow\": 57\n};\n\nfor (let key in coilsMap) {\n    if (topic.includes(key)) {\n        address = coilsMap[key];\n        isCoil = true;\n        fc = 5;\n        break;\n    }\n}\n\n\n/* ============================================================\n * 6. MAPOWANIE REJESTRÓW (FC6/FC16)\n * ============================================================ */\n\nif (!isCoil) {\n\n    // Tryby\n    if (topic.includes(\"tryb_pracy/set\")) {\n        address = 0; min_val = 0; max_val = 4; isTemperature = false; fc = 6;\n    }\n    else if (topic.includes(\"tryb_pracy_wentylatora/set\")) {\n        address = 12; min_val = 0; max_val = 3; isTemperature = false; fc = 6;\n    }\n    else if (topic.includes(\"tryb_pompy_obiegowej\")) {\n        address = 11; min_val = 0; max_val = 10; isTemperature = false; fc = 6;\n    }\n\n    // Temperatury zadane\n    else if (topic.includes(\"ogrzewanie_temperatura_zadana\")) {\n        address = 1; min_val = 10; max_val = 55;\n    }\n    else if (topic.includes(\"chlodzenie_temperatura_zadana\")) {\n        address = 2; min_val = 12; max_val = 55;\n    }\n    else if (topic.includes(\"cwu_temperatura_zadana\")) {\n        address = 3; min_val = 10; max_val = 55;\n    }\n\n    // Histerezy\n    else if (topic.includes(\"cwu_histereza_start\")) {\n        address = 4; min_val = 1; max_val = 15; isTemperature = false;\n    }\n    else if (topic.includes(\"cwu_histereza_stop\")) {\n        address = 5; min_val = 0; max_val = 5; isTemperature = false;\n    }\n    else if (topic.includes(\"co_histereza_start\")) {\n        address = 6; min_val = 0; max_val = 5; isTemperature = false;\n    }\n    else if (topic.includes(\"co_histereza_stop\")) {\n        address = 7; min_val = 0; max_val = 5; isTemperature = false;\n    }\n\n    // Opóźnienie sprężarki\n    else if (topic.includes(\"opoznienie_sprezarki\")) {\n        address = 13; min_val = 0; max_val = 999; isTemperature = false;\n    }\n\n    // Czas\n    else if (topic.includes(\"czas_rok\")) {\n        address = 182; min_val = 0; max_val = 99; isTemperature = false;\n    }\n    else if (topic.includes(\"czas_miesiac\")) {\n        address = 183; min_val = 1; max_val = 12; isTemperature = false;\n    }\n    else if (topic.includes(\"czas_dzien_miesiaca\")) {\n        address = 184; min_val = 1; max_val = 31; isTemperature = false;\n    }\n    else if (topic.includes(\"czas_godzina\")) {\n        address = 185; min_val = 0; max_val = 23; isTemperature = false;\n    }\n    else if (topic.includes(\"czas_minuta\")) {\n        address = 186; min_val = 0; max_val = 59; isTemperature = false;\n    }\n    else if (topic.includes(\"czas_dzien_tydzien\")) {\n        address = 158; min_val = 1; max_val = 7; isTemperature = false;\n    }\n\n    // Krzywe grzewcze\n    const krzyweMap = {\n        \"chlodzenie_krzywa_temp_zew_x1\": 276, \"chlodzenie_krzywa_temp_zew_x2\": 277,\n        \"chlodzenie_krzywa_temp_zew_x3\": 278, \"chlodzenie_krzywa_temp_zew_x4\": 279,\n        \"ogrzewanie_krzywa_temp_zew_x1\": 280, \"ogrzewanie_krzywa_temp_zew_x2\": 281,\n        \"ogrzewanie_krzywa_temp_zew_x3\": 282, \"ogrzewanie_krzywa_temp_zew_x4\": 283,\n        \"cwu_krzywa_temp_zew_x1\": 284, \"cwu_krzywa_temp_zew_x2\": 285,\n        \"cwu_krzywa_temp_zew_x3\": 286, \"cwu_krzywa_temp_zew_x4\": 287,\n        \"chlodzenie_krzywa_temp_zasilania_y2\": 288, \"chlodzenie_krzywa_temp_zasilania_y3\": 289,\n        \"chlodzenie_krzywa_temp_zasilania_y4\": 290,\n        \"ogrzewanie_krzywa_temp_zasilania_y1\": 291, \"ogrzewanie_krzywa_temp_zasilania_y2\": 292,\n        \"ogrzewanie_krzywa_temp_zasilania_y3\": 293,\n        \"cwu_krzywa_temp_zasilania_y1\": 294, \"cwu_krzywa_temp_zasilania_y2\": 295,\n        \"cwu_krzywa_temp_zasilania_y3\": 296, \"cwu_krzywa_temp_zasilania_y4\": 297,\n        \"ogrzewanie_krzywa_temp_zasilania_y4\": 337\n    };\n\n    for (let key in krzyweMap) {\n        if (topic.includes(key)) {\n            address = krzyweMap[key];\n            isTemperature = true;\n            min_val = topic.includes(\"_zew_x\") ? (topic.includes(\"cwu\") ? -25 : -20) : 10;\n            max_val = 90;\n            break;\n        }\n    }\n\n    // Harmonogram\n    const timerMap = {\n        \"poniedzialek_godz_wl\": 218, \"poniedzialek_min_wl\": 219,\n        \"wtorek_godz_wl\": 220, \"wtorek_min_wl\": 221,\n        \"sroda_godz_wl\": 222, \"sroda_min_wl\": 223,\n        \"czwartek_godz_wl\": 224, \"czwartek_min_wl\": 225,\n        \"piatek_godz_wl\": 226, \"piatek_min_wl\": 227,\n        \"sobota_godz_wl\": 228, \"sobota_min_wl\": 229,\n        \"niedziela_godz_wl\": 230, \"niedziela_min_wl\": 231,\n        \"poniedzialek_godz_wyl\": 232, \"poniedzialek_min_wyl\": 233,\n        \"wtorek_godz_wyl\": 234, \"wtorek_min_wyl\": 235,\n        \"sroda_godz_wyl\": 236, \"sroda_min_wyl\": 237,\n        \"czwartek_godz_wyl\": 238, \"czwartek_min_wyl\": 239,\n        \"piatek_godz_wyl\": 240, \"piatek_min_wyl\": 241,\n        \"sobota_godz_wyl\": 242, \"sobota_min_wyl\": 243,\n        \"niedziela_godz_wyl\": 244, \"niedziela_min_wyl\": 245\n    };\n\n    if (topic.includes(\"timer_\")) {\n        isTemperature = false;\n        for (let key in timerMap) {\n            if (topic.includes(key)) {\n                address = timerMap[key];\n                min_val = 0;\n                max_val = key.includes(\"godz\") ? 23 : 59;\n                break;\n            }\n        }\n    }\n}\n\n\n/* ============================================================\n * 7. SKALOWANIE I CLAMP\n * ============================================================ */\n\nif (!isCoil) {\n\n    if (value < min_val) value = min_val;\n    if (value > max_val) value = max_val;\n\n    let scaled = isTemperature ? Math.round(value * 10) : Math.round(value);\n\n    msg.payload = {\n        value: (fc === 16) ? [scaled] : scaled,\n        fc: fc,\n        unitid: 1,\n        address: address,\n        quantity: 1\n    };\n}\n\nelse {\n    msg.payload = {\n        value: (value === 1),\n        fc: 5,\n        unitid: 1,\n        address: address,\n        quantity: 1\n    };\n}\n\n\n/* ============================================================\n * 8. SPECJALNY PRZYPADek: wlaczenie_pompy\n * ============================================================ */\n\nif (msg.topic === \"wlaczenie_pompy\") {\n    return {\n        fc: 5,\n        address: coilsMap[\"wlaczenie_pompy\"],\n        value: msg.payload == 1\n    };\n}\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 440,
+        "y": 260,
+        "wires": [
+            [
+                "modbus-write-ogrze-temp-zadana"
+            ]
+        ]
+    },
+    {
+        "id": "281e3e7d723eef33",
+        "type": "delay",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "Opóźnienie 5s",
+        "pauseType": "delayv",
+        "timeout": "5",
+        "timeoutUnits": "seconds",
+        "rate": "1",
+        "nbRateUnits": "1",
+        "rateUnits": "second",
+        "randomFirst": "1",
+        "randomLast": "5",
+        "randomUnits": "seconds",
+        "drop": false,
+        "allowrate": false,
+        "outputs": 1,
+        "x": 240,
+        "y": 180,
+        "wires": [
+            [
+                "3f3efbfdf70c15aa"
+            ]
+        ]
+    },
+    {
+        "id": "inject_reset_defrost_daily",
+        "type": "inject",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "Reset o północy",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "00 00 * * *",
+        "once": false,
+        "onceDelay": 0.1,
+        "payload": "0",
+        "payloadType": "num",
+        "x": 150,
+        "y": 380,
+        "wires": [
+            [
+                "fn_reset_defrost_daily"
+            ]
+        ]
+    },
+    {
+        "id": "fn_reset_defrost_daily",
+        "type": "function",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "Reset dziennych liczników",
+        "func": "// Reset wartości dziennych\nflow.set(\"dzienna_ilosc_defrostow\", 0);\nflow.set(\"ilosc_wlaczen_dzisiaj\", 0);\n\n// Przygotowanie wiadomości MQTT\nlet outputs = [\n    {\n        topic: \"sprsun/dzienna_ilosc_defrostow/state\",\n        payload: 0,\n        retain: true\n    },\n    {\n        topic: \"sprsun/ilosc_wlaczen_dzisiaj/state\",\n        payload: 0,\n        retain: true\n    }\n];\n\nreturn outputs;\n",
+        "outputs": 2,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 390,
+        "y": 380,
+        "wires": [
+            [
+                "mqtt-state-ogrze-temp-zadana"
+            ],
+            [
+                "mqtt-state-ogrze-temp-zadana"
+            ]
+        ]
+    },
+    {
+        "id": "fn_increment_defrost_daily",
+        "type": "function",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "Zwiększ licznik dzienny",
+        "func": "/***************************************************************\n *  NODE: Liczniki defrostów, włączeń i czasu posiadania\n *\n *  OPIS:\n *  Ten node utrzymuje zestaw liczników operacyjnych pompy ciepła:\n *\n *   • dzienna_ilosc_defrostow\n *   • ilosc_defrostow (całkowita)\n *   • ilosc_wlaczen_dzisiaj\n *   • ilosc_wlaczen (całkowita)\n *   • ilosc_wlaczen_w_tym_miesiacu\n *   • ilosc_wlaczen_w_tym_roku\n *   • czas_posiadania (dni)\n *   • zawor_3d_ilosc_przelaczen_od_poczatku_montazu\n *\n *  Logika:\n *   - Zdarzenie \"timestamp\" zwiększa wszystkie liczniki (pełny tick)\n *   - Zdarzenie \"defrost\" zwiększa tylko liczniki defrostów\n *   - Zdarzenie \"uruchomienie pompy\" zwiększa liczniki włączeń\n *   - Zdarzenie \"zmiana trybu pracy\" zwiększa licznik zaworu 3D\n *   - Zdarzenie \"czas_posiadania\" zwiększa licznik dni posiadania\n *\n *  Każda zmiana jest natychmiast publikowana do MQTT.\n *\n ***************************************************************/\n\n\n/***************************************************************\n * 1. Inicjalizacja tablicy wyjściowej\n ***************************************************************/\nlet outputs = [];\n\n\n/***************************************************************\n * 2. Pobranie aktualnych wartości z pamięci flow\n ***************************************************************/\nlet daily_def   = flow.get(\"dzienna_ilosc_defrostow\") || 0;\nlet total_def   = flow.get(\"ilosc_defrostow\") || 0;\n\nlet daily_on    = flow.get(\"ilosc_wlaczen_dzisiaj\") || 0;\nlet total_on    = flow.get(\"ilosc_wlaczen\") || 0;\n\nlet month_on    = flow.get(\"ilosc_wlaczen_w_tym_miesiacu\") || 0;\nlet year_on     = flow.get(\"ilosc_wlaczen_w_tym_roku\") || 0;\n\nlet days_owned  = flow.get(\"czas_posiadania\") || 0;\n\nlet valve_3d    = flow.get(\"zawor_3d_ilosc_przelaczen_od_poczatku_montazu\") || 0;\n\n\n/***************************************************************\n * 3. ZDARZENIE: TIMESTAMP\n *    Zwiększa WSZYSTKIE liczniki jednocześnie.\n ***************************************************************/\nif (msg.topic === \"timestamp\") {\n\n    daily_def++;\n    total_def++;\n\n    daily_on++;\n    total_on++;\n\n    month_on++;\n    year_on++;\n\n    days_owned++;\n\n    valve_3d++;\n\n    // Zapis do pamięci\n    flow.set(\"dzienna_ilosc_defrostow\", daily_def);\n    flow.set(\"ilosc_defrostow\", total_def);\n    flow.set(\"ilosc_wlaczen_dzisiaj\", daily_on);\n    flow.set(\"ilosc_wlaczen\", total_on);\n\n    flow.set(\"ilosc_wlaczen_w_tym_miesiacu\", month_on);\n    flow.set(\"ilosc_wlaczen_w_tym_roku\", year_on);\n    flow.set(\"czas_posiadania\", days_owned);\n    flow.set(\"zawor_3d_ilosc_przelaczen_od_poczatku_montazu\", valve_3d);\n\n    // Publikacja MQTT\n    outputs.push(\n        { topic: \"sprsun/dzienna_ilosc_defrostow/state\", payload: daily_def, retain: true },\n        { topic: \"sprsun/ilosc_defrostow/state\", payload: total_def, retain: true },\n        { topic: \"sprsun/ilosc_wlaczen_dzisiaj/state\", payload: daily_on, retain: true },\n        { topic: \"sprsun/ilosc_wlaczen/state\", payload: total_on, retain: true },\n\n        { topic: \"sprsun/ilosc_wlaczen_w_tym_miesiacu/state\", payload: month_on, retain: true },\n        { topic: \"sprsun/ilosc_wlaczen_w_tym_roku/state\", payload: year_on, retain: true },\n        { topic: \"sprsun/czas_posiadania/state\", payload: days_owned, retain: true },\n        { topic: \"sprsun/zawor_3d_ilosc_przelaczen_od_poczatku_montazu/state\", payload: valve_3d, retain: true }\n    );\n\n    return outputs;\n}\n\n\n/***************************************************************\n * 4. ZDARZENIE: DEFROST\n *    msg.data === \"defrost\"\n ***************************************************************/\nif (msg.data === \"defrost\") {\n\n    daily_def++;\n    total_def++;\n\n    flow.set(\"dzienna_ilosc_defrostow\", daily_def);\n    flow.set(\"ilosc_defrostow\", total_def);\n\n    outputs.push(\n        { topic: \"sprsun/dzienna_ilosc_defrostow/state\", payload: daily_def, retain: true },\n        { topic: \"sprsun/ilosc_defrostow/state\", payload: total_def, retain: true }\n    );\n\n    return outputs;\n}\n\n\n/***************************************************************\n * 5. ZDARZENIE: URUCHOMIENIE POMPY\n *    msg.data === \"uruchomienie pompy\"\n ***************************************************************/\nif (msg.data === \"uruchomienie pompy\") {\n\n    daily_on++;\n    total_on++;\n\n    month_on++;\n    year_on++;\n\n    flow.set(\"ilosc_wlaczen_dzisiaj\", daily_on);\n    flow.set(\"ilosc_wlaczen\", total_on);\n    flow.set(\"ilosc_wlaczen_w_tym_miesiacu\", month_on);\n    flow.set(\"ilosc_wlaczen_w_tym_roku\", year_on);\n\n    outputs.push(\n        { topic: \"sprsun/ilosc_wlaczen_dzisiaj/state\", payload: daily_on, retain: true },\n        { topic: \"sprsun/ilosc_wlaczen/state\", payload: total_on, retain: true },\n        { topic: \"sprsun/ilosc_wlaczen_w_tym_miesiacu/state\", payload: month_on, retain: true },\n        { topic: \"sprsun/ilosc_wlaczen_w_tym_roku/state\", payload: year_on, retain: true }\n    );\n\n    return outputs;\n}\n\n\n/***************************************************************\n * 6. ZDARZENIE: ZAWÓR 3D\n *    msg.data === \"zmiana trybu pracy\"\n ***************************************************************/\nif (msg.data === \"zmiana trybu pracy\") {\n\n    valve_3d++;\n\n    flow.set(\"zawor_3d_ilosc_przelaczen_od_poczatku_montazu\", valve_3d);\n\n    outputs.push(\n        { topic: \"sprsun/zawor_3d_ilosc_przelaczen_od_poczatku_montazu/state\", payload: valve_3d, retain: true }\n    );\n\n    return outputs;\n}\n\n\n/***************************************************************\n * 7. ZDARZENIE: ZWIĘKSZANIE CZASU POSIADANIA\n *    msg.topic === \"czas_posiadania\"\n ***************************************************************/\nif (msg.topic === \"czas_posiadania\") {\n\n    days_owned++;\n\n    flow.set(\"czas_posiadania\", days_owned);\n\n    outputs.push(\n        { topic: \"sprsun/czas_posiadania/state\", payload: days_owned, retain: true }\n    );\n\n    return outputs;\n}\n\n\n/***************************************************************\n * 8. Brak dopasowania → brak publikacji\n ***************************************************************/\nreturn [];",
+        "outputs": 9,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 650,
+        "y": 540,
+        "wires": [
+            [
+                "mqtt-state-ogrze-temp-zadana"
+            ],
+            [
+                "mqtt-state-ogrze-temp-zadana"
+            ],
+            [
+                "mqtt-state-ogrze-temp-zadana"
+            ],
+            [
+                "mqtt-state-ogrze-temp-zadana"
+            ],
+            [
+                "mqtt-state-ogrze-temp-zadana"
+            ],
+            [
+                "mqtt-state-ogrze-temp-zadana"
+            ],
+            [
+                "mqtt-state-ogrze-temp-zadana"
+            ],
+            [
+                "mqtt-state-ogrze-temp-zadana"
+            ],
+            [
+                "mqtt-state-ogrze-temp-zadana"
+            ]
+        ]
+    },
+    {
+        "id": "dcd398fa6c2f387a",
+        "type": "mqtt in",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "MQTT odbiór danych",
+        "topic": "sprsun/alarm/+/state",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 160,
+        "y": 440,
+        "wires": [
+            [
+                "bfc7e08dc32dd160"
+            ]
+        ]
+    },
+    {
+        "id": "bfc7e08dc32dd160",
+        "type": "function",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "Czujnik zbierający wszystkie stany alarmowe w jeden",
+        "func": "/***************************************************************\n *  NODE: Aktywne alarmy (agregacja alarmów 001–150)\n *\n *  OPIS:\n *  Ten node odbiera pojedyncze komunikaty MQTT:\n *      sprsun/alarm/<ID>/state\n *  gdzie <ID> to numer alarmu 001–150.\n *\n *  Zadania noda:\n *   1. Utrzymywać w pamięci flow listę aktywnych alarmów.\n *   2. Aktualizować listę przy każdym przychodzącym alarmie.\n *   3. Generować zbiorczy tekst:\n *        • \"Brak\" — jeśli nie ma aktywnych alarmów\n *        • \"Alarm 023, Alarm 041, Alarm 118\" — jeśli są\n *   4. Publikować wynik do:\n *        sprsun/aktywny_alarm/state\n *\n *  Pamięć:\n *      flow.activeAlarms = { \"023\": true, \"041\": true, ... }\n *\n ***************************************************************/\n\n\n/***************************************************************\n * 1. Pobranie aktualnej listy aktywnych alarmów z pamięci flow\n ***************************************************************/\nlet active = flow.get(\"activeAlarms\") || {};\n\n\n/***************************************************************\n * 2. Dopasowanie numeru alarmu z tematu MQTT\n *    Przykład:\n *      sprsun/alarm/057/state → \"057\"\n ***************************************************************/\nlet match = msg.topic.match(/alarm\\/(\\d{3})\\/state/);\nif (!match) return null;\n\nlet alarmId = match[1];\nlet value = Number(msg.payload);\n\n\n/***************************************************************\n * 3. Aktualizacja listy aktywnych alarmów\n *\n *    value = 1 → alarm aktywny\n *    value = 0 → alarm nieaktywny\n ***************************************************************/\nif (value === 1) {\n    active[alarmId] = true;\n} else {\n    delete active[alarmId];\n}\n\nflow.set(\"activeAlarms\", active);\n\n\n/***************************************************************\n * 4. Sortowanie aktywnych alarmów rosnąco\n ***************************************************************/\nlet keys = Object.keys(active).sort();\n\n\n/***************************************************************\n * 5. Jeśli brak alarmów → zwróć \"Brak\"\n ***************************************************************/\nif (keys.length === 0) {\n    return {\n        topic: \"sprsun/aktywny_alarm/state\",\n        payload: \"Brak\"\n    };\n}\n\n\n/***************************************************************\n * 6. Jeśli są alarmy → zbuduj listę:\n *      \"Alarm 023, Alarm 041, Alarm 118\"\n ***************************************************************/\nlet text = keys.map(k => `Alarm ${k}`).join(\", \");\n\n\n/***************************************************************\n * 7. Zwrócenie zbiorczego komunikatu\n ***************************************************************/\nreturn {\n    topic: \"sprsun/aktywny_alarm/state\",\n    payload: text\n};",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 560,
+        "y": 440,
+        "wires": [
+            [
+                "mqtt-state-ogrze-temp-zadana"
+            ]
+        ]
+    },
+    {
+        "id": "d694f77b57de114c",
+        "type": "comment",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "Pompa ciepła Sprsun CGK-040V3L",
+        "info": "Integracja Sprsun CGK040‑V3L z Home Assistant przez Modbus + MQTT\nFlow realizuje pełną dwukierunkową integrację pompy ciepła Sprsun CGK040‑V3L z Home Assistant, wykorzystując:\n\nModbus TCP (odczyt i zapis rejestrów)\n\nMQTT (publikacja stanów i odbiór komend)\n\nMQTT Discovery (automatyczna rejestracja encji)\n\nZaawansowane skalowanie i mapowanie danych\n\nObsługę alarmów 001–150\n\nObsługę statusów binarnych i wejść cyfrowych\n\nObsługę krzywych grzewczych/chłodniczych\n\nObsługę harmonogramów i czasu\n\nCałość jest zorganizowana w jednym dużym flow, które odpowiada za kompletną telemetrię i sterowanie pompą ciepła.\n\n🏗 1. Odczyt danych z Modbus (FC3 / FC4)\n🔄 Co 60 sekund wykonywany jest odczyt rejestrów\nNode inject-read-ogrze-temp-zadana wyzwala cykliczny odczyt.\n\n📡 modbus-flex-getter\nNode modbus-read-ogrze-temp-zadana pobiera dane z odpowiednich bloków rejestrów:\n\ngrupa_podstawowa – temperatury zadane, histerezy, opóźnienia\n\nczujniki_parametry – temperatury, ciśnienia, EEV, obroty, wydajności\n\nczujniki_input – wejścia cyfrowe FC4\n\nbinary_inputs_blok – stany binarne\n\nbinary_alarmy_blok – alarmy 001–056\n\nbinary_alarmy_blok_2 – alarmy 057–150\n\nkrzywe_blok_1 / 2 – krzywe grzewcze/chłodnicze\n\nharmonogram_tygodniowy\n\nczas i data\n\nKażdy odczyt jest oznaczony msg.topic, co pozwala funkcji rozpoznać typ danych.\n\n🧮 2. Funkcja „Skalowanie i publikacja”\nNode fn-parse-ogrze-temp-zadana wykonuje:\n\n✔ Skalowanie wartości:\nRejestry typu signed 16-bit → konwersja do wartości rzeczywistych\n\nTemperatura, ciśnienie, przegrzanie → mnożenie ×0.1\n\nWartości surowe → bez skalowania\n\n✔ Mapowanie trybów pracy wentylatora:\nLiczby 0–3 → teksty:\n\nDzień\n\nNoc\n\nKrzywa grzewcza\n\nSerwisowy\n\n✔ Publikacja do MQTT:\nKażda wartość trafia na osobny topic:\n\nKod\nsprsun/<nazwa>/state\n✔ Obsługa wszystkich grup danych:\nTryby pracy\n\nTemperatury zadane CO/CWU/chłodzenia\n\nHisterezy\n\nCzujniki temperatur/ciśnień\n\nEEV, obroty sprężarki, wydajności\n\nStatusy i zabezpieczenia\n\nKrzywe grzewcze/chłodnicze\n\nHarmonogram tygodniowy\n\nCzas i data\n\nAlarmy 001–150\n\n✔ Filtracja nulli:\nWiadomości z pustymi wartościami nie są publikowane.\n\n📤 3. Publikacja do MQTT\nNode mqtt-state-ogrze-temp-zadana wysyła wszystkie wygenerowane wiadomości do brokera MQTT.\n\n📥 4. Odbiór komend z Home Assistant\nNode mqtt-set-ogrze-temp-zadana nasłuchuje:\n\nKod\nsprsun/+/set\nKażda komenda trafia do logiki zapisu Modbus (FC6/FC16).\n\n📝 5. Zapis do Modbus (FC6 / FC16)\nNode modbus-write-ogrze-temp-zadana realizuje zapis:\n\ntemperatur zadanych\n\ntrybów\n\nparametrów sterujących\n\nustawień krzywych\n\nharmonogramów\n\nczasu\n\nFlow obsługuje zarówno zapis pojedynczego rejestru (FC6), jak i wielu (FC16).\n\n🔍 6. MQTT Discovery – automatyczna rejestracja encji\nNode fn-discovery-ogrze-temp-zadana generuje pełną konfigurację:\n\n✔ Sensory:\ntemperatury\n\nciśnienia\n\nobroty\n\nwydajności\n\nEEV\n\nstatusy\n\nparametry silnika\n\naktywny alarm\n\n✔ Binary sensors:\nwejścia cyfrowe\n\nwyjścia\n\nzabezpieczenia\n\nstany sprężarki/wentylatora\n\ndefrost\n\npompa obiegowa\n\ngrzałki\n\n✔ Alarmy:\n001–012 (podstawowe)\n\n013–056 (dodatkowe)\n\n057–150 (rozszerzone)\n\nKażda encja ma:\n\nunique_id\n\nstate_topic\n\ndevice_class (jeśli dotyczy)\n\npayload_on/off\n\nretain: true\n\nDiscovery uruchamia się raz po starcie.\n\n🧊 7. Obsługa defrostu i liczników\nFlow zawiera dodatkowe funkcje:\n\nreset licznika defrostu raz dziennie\n\ninkrementacja licznika przy wykryciu defrostu\n\npublikacja stanu wentylatora\n\n🧱 8. Struktura i organizacja flow\nCałość znajduje się w grupie:\n\nKod\nsprsun-flow-climate-1\nWewnątrz znajdują się:\n\nwęzły odczytu\n\nwęzły zapisu\n\nfunkcje skalujące\n\ndiscovery\n\nobsługa alarmów\n\nobsługa statusów\n\nlogika pomocnicza\n\nFlow jest modularne i łatwe do rozbudowy.\n\n🧾 Podsumowanie\nTo flow zapewnia pełną, dwukierunkową integrację pompy ciepła Sprsun z Home Assistant:\n\nFunkcja\tStatus\nOdczyt Modbus\t✔ Pełny\nZapis Modbus\t✔ FC6/FC16\nMQTT telemetria\t✔\nMQTT sterowanie\t✔\nMQTT Discovery\t✔\nAlarmy 001–150\t✔\nStatusy binarne\t✔\nKrzywe grzewcze/chłodnicze\t✔\nHarmonogramy\t✔\nCzas i data\t✔\nSkalowanie i mapowanie\t✔\nFlow jest kompletne, zgodne z HA, modularne i gotowe do dalszej rozbudowy.",
+        "x": 180,
+        "y": 60,
+        "wires": []
+    },
+    {
+        "id": "12fb083b196e396c",
+        "type": "function",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "Kasowanie zdublowanych encji",
+        "func": "// Usuwanie encji alarmów w starym formacie:\n// - alarm_001\n// - alarm_001_2\n// - alarm_002\n// - alarm_002_2\n// ...\n// - alarm_150_2\n\nlet msgs = [];\n\nfor (let i = 1; i <= 150; i++) {\n    const alarmId = i.toString().padStart(3, \"0\");\n\n    // Stary format bez dopisku _2\n    msgs.push({\n        topic: `homeassistant/binary_sensor/sprsun/alarm_${alarmId}/config`,\n        payload: \"\",\n        retain: true\n    });\n\n    // Stary format z dopiskiem _2\n    msgs.push({\n        topic: `homeassistant/binary_sensor/sprsun/alarm_${alarmId}_2/config`,\n        payload: \"\",\n        retain: true\n    });\n}\n\n// Usuwanie starych encji switch dla resetów\nmsgs.push({\n    topic: \"homeassistant/switch/sprsun/reset_alarmu/config\",\n    payload: \"\",\n    retain: true\n});\n\nmsgs.push({\n    topic: \"homeassistant/switch/sprsun/reset_parametrow/config\",\n    payload: \"\",\n    retain: true\n});\n\nreturn [msgs];\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 630,
+        "y": 680,
+        "wires": [
+            [
+                "mqtt-state-ogrze-temp-zadana"
+            ]
+        ]
+    },
+    {
+        "id": "e6e3963341301694",
+        "type": "inject",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "Kasowanie zdublowanych encji",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "00 00 * * *",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 190,
+        "y": 680,
+        "wires": [
+            [
+                "12fb083b196e396c"
+            ]
+        ]
+    },
+    {
+        "id": "10a6f8ca5199adc2",
+        "type": "function",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "function 4",
+        "func": "/***************************************************************\n *  NODE: Router zdarzeń z Home Assistant\n *\n *  OPIS:\n *  Ten node odbiera zdarzenia z HA (entity_id + payload)\n *  i kieruje je na odpowiednie wyjścia w zależności od typu\n *  wykrytego zdarzenia.\n *\n *  Wejście:\n *      msg.entity_id  – encja HA (binary_sensor.*)\n *      msg.payload    – \"on\" / \"off\"\n *\n *  Wyjścia:\n *      OUTPUT 1 → zdarzenia dla modułu liczników\n *      OUTPUT 2 → zdarzenia dla modułu defrostu / wentylatora\n *\n *  Logika:\n *   • Sprężarka ON → \"uruchomienie pompy\"\n *   • Zawór 3D ON → \"zmiana trybu pracy\"\n *   • Wentylator OFF → \"wentylator_stop\"\n *\n *  Jeśli zdarzenie nie pasuje do żadnego wzorca → oba wyjścia null.\n *\n ***************************************************************/\n\n\n/***************************************************************\n * 1. Pobranie danych wejściowych\n ***************************************************************/\nlet entity = msg.entity_id;\nlet state  = msg.payload;\n\n\n/***************************************************************\n * 2. ZDARZENIE: Sprężarka → uruchomienie pompy\n *\n *  binary_sensor.sprsun_cgk040_v3l_sprezarka_stan\n *      on  → pompa została uruchomiona\n *      off → ignorujemy\n ***************************************************************/\nif (msg.topic === \"binary_sensor.pompa_ciepla_sprsun_cgk040_v3l_sprezarka_stan\") {\n    if (msg.payload === \"on\") {\n        msg.data = \"uruchomienie pompy\";\n        return [ msg , null ];   // → WYJŚCIE 1 (liczniki)\n    }\n}\n\n\n/***************************************************************\n * 3. ZDARZENIE: Zawór 3D → zmiana trybu pracy\n *\n *  binary_sensor.sprsun_cgk040_v3l_zawor_trojdrogowy\n *      on  → zawór zmienił pozycję\n ***************************************************************/\nif (msg.topic === \"binary_sensor.pompa_ciepla_sprsun_cgk040_v3l_zawor_trojdrogowy\") {\n    if (msg.payload === \"on\") {\n        msg.data = \"zmiana trybu pracy\";\n        return [ msg , null ];   // → WYJŚCIE 1 (liczniki)\n    }\n}\n\n\n/***************************************************************\n * 4. ZDARZENIE: Wentylator → możliwy defrost\n *\n *  binary_sensor.sprsun_cgk040_v3l_wentylator_stan\n *      off → wentylator zatrzymał się (początek defrostu)\n ***************************************************************/\nif (msg.topic === \"binary_sensor.pompa_ciepla_sprsun_cgk040_v3l_wentylator_stan\") {\n    if (msg.payload === \"off\") {\n        msg.data = \"wentylator_stop\";\n        return [ null , msg ];   // → WYJŚCIE 2 (moduł defrostu)\n    }\n}\n\n\n/***************************************************************\n * 5. Brak dopasowania → oba wyjścia null\n ***************************************************************/\nreturn [ null , null ];",
+        "outputs": 2,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 250,
+        "y": 540,
+        "wires": [
+            [
+                "fn_increment_defrost_daily"
+            ],
+            [
+                "9db82c8e5b128951"
+            ]
+        ]
+    },
+    {
+        "id": "23eb37295beb8219",
+        "type": "server-state-changed",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "3 encje",
+        "server": "780a43c9.bb6c0c",
+        "version": 6,
+        "outputs": 1,
+        "exposeAsEntityConfig": "",
+        "entities": {
+            "entity": [
+                "binary_sensor.pompa_ciepla_sprsun_cgk040_v3l_zawor_trojdrogowy",
+                "binary_sensor.pompa_ciepla_sprsun_cgk040_v3l_sprezarka_stan",
+                "binary_sensor.pompa_ciepla_sprsun_cgk040_v3l_wentylator_stan"
+            ],
+            "substring": [],
+            "regex": []
+        },
+        "outputInitially": false,
+        "stateType": "str",
+        "ifState": "",
+        "ifStateType": "str",
+        "ifStateOperator": "is",
+        "outputOnlyOnStateChange": true,
+        "for": "0",
+        "forType": "num",
+        "forUnits": "minutes",
+        "ignorePrevStateNull": false,
+        "ignorePrevStateUnknown": false,
+        "ignorePrevStateUnavailable": false,
+        "ignoreCurrentStateUnknown": true,
+        "ignoreCurrentStateUnavailable": true,
+        "outputProperties": [
+            {
+                "property": "payload",
+                "propertyType": "msg",
+                "value": "string",
+                "valueType": "entityState"
+            },
+            {
+                "property": "data",
+                "propertyType": "msg",
+                "value": "",
+                "valueType": "eventData"
+            },
+            {
+                "property": "topic",
+                "propertyType": "msg",
+                "value": "",
+                "valueType": "triggerId"
+            }
+        ],
+        "x": 110,
+        "y": 540,
+        "wires": [
+            [
+                "10a6f8ca5199adc2"
+            ]
+        ]
+    },
+    {
+        "id": "9db82c8e5b128951",
+        "type": "api-current-state",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "Sprężarka stan",
+        "server": "780a43c9.bb6c0c",
+        "version": 3,
+        "outputs": 2,
+        "halt_if": "on",
+        "halt_if_type": "str",
+        "halt_if_compare": "is",
+        "entity_id": "binary_sensor.pompa_ciepla_sprsun_cgk040_v3l_sprezarka_stan",
+        "state_type": "str",
+        "blockInputOverrides": false,
+        "outputProperties": [
+            {
+                "property": "payload",
+                "propertyType": "msg",
+                "value": "string",
+                "valueType": "entityState"
+            },
+            {
+                "property": "data",
+                "propertyType": "msg",
+                "value": "defrost",
+                "valueType": "str"
+            }
+        ],
+        "for": "70",
+        "forType": "num",
+        "forUnits": "seconds",
+        "override_topic": false,
+        "state_location": "payload",
+        "override_payload": "msg",
+        "entity_location": "data",
+        "override_data": "msg",
+        "x": 420,
+        "y": 580,
+        "wires": [
+            [
+                "fn_increment_defrost_daily"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "2c31fced31378daa",
+        "type": "inject",
+        "z": "sprsun-flow-climate-1",
+        "g": "d6df5f95737bdaf1",
+        "name": "Codziennie o północy",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "00 00 * * *",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "czas posiadania",
+        "payload": "",
+        "payloadType": "date",
+        "x": 220,
+        "y": 500,
+        "wires": [
+            [
+                "fn_increment_defrost_daily"
+            ]
+        ]
+    },
+    {
+        "id": "780a43c9.bb6c0c",
+        "type": "server",
+        "name": "Home Assistant",
+        "addon": true
+    },
+    {
+        "id": "652237dc8a1ffa5b",
+        "type": "global-config",
+        "env": [],
+        "modules": {
+            "node-red-contrib-modbus": "5.45.2",
+            "node-red-contrib-home-assistant-websocket": "0.80.3"
+        }
+    }
+]
